@@ -10,7 +10,6 @@
     #info h1 { color: #ff3b6b; margin: 0; }
   </style>
 
-  <!-- This tells the browser where to download Three.js (the 3D library) from -->
   <script type="importmap">
   {
     "imports": {
@@ -30,32 +29,27 @@
     import * as THREE from 'three';
     import { ARButton } from 'three/addons/webxr/ARButton.js';
 
-    // 1. The scene: an empty 3D world we put things into
+    // ---------- STAGE 1: SCENE + PASSTHROUGH ----------
     const scene = new THREE.Scene();
 
-    // 2. The camera: the player's eyes (1.2 m high = seated eye level)
     const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
     camera.position.set(0, 1.2, 0);
 
-    // 3. The renderer: draws the 3D world. alpha:true = see-through background for passthrough
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setPixelRatio(devicePixelRatio);
     renderer.setSize(innerWidth, innerHeight);
     renderer.xr.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // 4. The START AR button. We ask for hand tracking and surface detection
     document.body.appendChild(ARButton.createButton(renderer, {
       requiredFeatures: ['local-floor'],
       optionalFeatures: ['hand-tracking', 'plane-detection']
     }));
 
-    // Hide the title text once the player enters AR
     renderer.xr.addEventListener('sessionstart', () => {
       document.getElementById('info').style.display = 'none';
     });
 
-    // 5. Build a dart target out of 3 flat circles: blue outer, yellow middle, red centre
     function makeTarget() {
       const target = new THREE.Group();
       const rings = [
@@ -68,26 +62,70 @@
           new THREE.CircleGeometry(ring.radius, 48),
           new THREE.MeshBasicMaterial({ color: ring.color })
         );
-        mesh.position.z = i * 0.002; // tiny gap so the circles don't flicker
+        mesh.position.z = i * 0.002;
         target.add(mesh);
       });
       return target;
     }
 
-    // Place the target 1.5 m in front of the player, at seated eye level
     const target = makeTarget();
     target.position.set(0, 1.2, -1.5);
     scene.add(target);
 
-    // 6. Keep the picture correct if the window changes size
+    // ---------- STAGE 2: GAZE ----------
+    const target2 = makeTarget();
+    target2.position.set(-0.8, 1.0, -1.6);
+    scene.add(target2);
+
+    const targets = [target, target2];
+    let gazedTarget = null;
+
+    const gazeDot = new THREE.Mesh(
+      new THREE.RingGeometry(0.008, 0.013, 32),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true })
+    );
+    gazeDot.position.set(0, 0, -1);
+    gazeDot.renderOrder = 999;
+    gazeDot.onBeforeRender = () => gazeDot.updateMatrixWorld();
+    camera.add(gazeDot);
+    scene.add(camera);
+
+    const raycaster = new THREE.Raycaster();
+    const eyePos = new THREE.Vector3();
+    const eyeDir = new THREE.Vector3();
+    const bigSize = new THREE.Vector3(1.12, 1.12, 1.12);
+    const normalSize = new THREE.Vector3(1, 1, 1);
+
+    function updateGaze() {
+      camera.getWorldPosition(eyePos);
+      camera.getWorldDirection(eyeDir);
+      raycaster.set(eyePos, eyeDir);
+
+      const hits = raycaster.intersectObjects(targets, true);
+      let found = null;
+      if (hits.length > 0) {
+        found = hits[0].object;
+        while (found.parent && !targets.includes(found)) found = found.parent;
+      }
+      gazedTarget = found;
+
+      targets.forEach(t => {
+        t.scale.lerp(t === gazedTarget ? bigSize : normalSize, 0.15);
+      });
+
+      gazeDot.material.color.set(gazedTarget ? 0x39ff88 : 0xffffff);
+    }
+
+    // ---------- WINDOW RESIZE ----------
     window.addEventListener('resize', () => {
       camera.aspect = innerWidth / innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(innerWidth, innerHeight);
     });
 
-    // 7. The game loop: redraws the scene about 72 times per second on Quest
+    // ---------- GAME LOOP (runs every frame) ----------
     renderer.setAnimationLoop(() => {
+      updateGaze();
       renderer.render(scene, camera);
     });
   </script>
