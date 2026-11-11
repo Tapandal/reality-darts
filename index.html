@@ -5,19 +5,91 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reality Darts</title>
   <style>
-    body {
-      margin: 0;
-      background: #0b0f1a;
-      color: white;
-      font-family: Arial, sans-serif;
-      text-align: center;
-      padding-top: 80px;
-    }
-    h1 { color: #ff3b6b; font-size: 48px; }
+    body { margin: 0; background: #0b0f1a; color: white; font-family: Arial, sans-serif; overflow: hidden; }
+    #info { position: absolute; top: 20px; width: 100%; text-align: center; z-index: 10; }
+    #info h1 { color: #ff3b6b; margin: 0; }
   </style>
+
+  <!-- This tells the browser where to download Three.js (the 3D library) from -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
 </head>
 <body>
-  <h1>🎯 Reality Darts</h1>
-  <p>Target the Room — our website is online!</p>
+  <div id="info">
+    <h1>🎯 Reality Darts</h1>
+    <p>Press START AR to begin</p>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+    // 1. The scene: an empty 3D world we put things into
+    const scene = new THREE.Scene();
+
+    // 2. The camera: the player's eyes (1.2 m high = seated eye level)
+    const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
+    camera.position.set(0, 1.2, 0);
+
+    // 3. The renderer: draws the 3D world. alpha:true = see-through background for passthrough
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // 4. The START AR button. We ask for hand tracking and surface detection
+    document.body.appendChild(ARButton.createButton(renderer, {
+      requiredFeatures: ['local-floor'],
+      optionalFeatures: ['hand-tracking', 'plane-detection']
+    }));
+
+    // Hide the title text once the player enters AR
+    renderer.xr.addEventListener('sessionstart', () => {
+      document.getElementById('info').style.display = 'none';
+    });
+
+    // 5. Build a dart target out of 3 flat circles: blue outer, yellow middle, red centre
+    function makeTarget() {
+      const target = new THREE.Group();
+      const rings = [
+        { radius: 0.25, color: 0x2f7bff },
+        { radius: 0.15, color: 0xffd23f },
+        { radius: 0.06, color: 0xff2d55 }
+      ];
+      rings.forEach((ring, i) => {
+        const mesh = new THREE.Mesh(
+          new THREE.CircleGeometry(ring.radius, 48),
+          new THREE.MeshBasicMaterial({ color: ring.color })
+        );
+        mesh.position.z = i * 0.002; // tiny gap so the circles don't flicker
+        target.add(mesh);
+      });
+      return target;
+    }
+
+    // Place the target 1.5 m in front of the player, at seated eye level
+    const target = makeTarget();
+    target.position.set(0, 1.2, -1.5);
+    scene.add(target);
+
+    // 6. Keep the picture correct if the window changes size
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // 7. The game loop: redraws the scene about 72 times per second on Quest
+    renderer.setAnimationLoop(() => {
+      renderer.render(scene, camera);
+    });
+  </script>
 </body>
 </html>
