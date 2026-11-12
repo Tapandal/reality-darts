@@ -28,6 +28,7 @@
   <script type="module">
     import * as THREE from 'three';
     import { ARButton } from 'three/addons/webxr/ARButton.js';
+    import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
     // ---------- STAGE 1: SCENE + PASSTHROUGH ----------
     const scene = new THREE.Scene();
@@ -116,18 +117,18 @@
       gazeDot.material.color.set(gazedTarget ? 0x39ff88 : 0xffffff);
     }
 
-    // ---------- WINDOW RESIZE ----------
-    window.addEventListener('resize', () => {
-      camera.aspect = innerWidth / innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(innerWidth, innerHeight);
-    });
+    // ---------- STAGE 3: HANDS + PINCH TO HOLD ----------
+    // Build a simple dart: silver tip, white body, pink flights. It points forward (+Z).
+    function makeDart() {
+      const dart = new THREE.Group();
+      const mat = (color) => new THREE.MeshBasicMaterial({ color, transparent: true, side: THREE.DoubleSide });
 
-    // ---------- GAME LOOP (runs every frame) ----------
-    renderer.setAnimationLoop(() => {
-      updateGaze();
-      renderer.render(scene, camera);
-    });
-  </script>
-</body>
-</html>
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.006, 0.03, 12), mat(0xcccccc));
+      tip.rotation.x = Math.PI / 2;
+      tip.position.z = 0.075;
+
+      const body = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.1, 12), mat(0xffffff));
+      body.rotation.x = Math.PI / 2;
+      body.position.z = 0.01;
+
+      const flight1 = new THREE.Mesh(new
