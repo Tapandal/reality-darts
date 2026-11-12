@@ -162,9 +162,18 @@
       setDartSolid(true);
     }
 
+    // Letting go of the pinch = try to throw (see Stage 4)
     function releaseDart() {
-      dartState = 'ready';  // Stage 4 will replace this with a real throw
       heldBy = null;
+      throwDart(getHandVelocity());
+      handSamples.length = 0;
+    }
+
+    // Hand disappeared while holding: put the dart back, no throw
+    function cancelDart() {
+      dartState = 'ready';
+      heldBy = null;
+      handSamples.length = 0;
       setDartSolid(false);
     }
 
@@ -188,7 +197,7 @@
       });
       controller.addEventListener('disconnected', () => {
         info.connected = false;
-        if (heldBy === info) releaseDart();
+        if (heldBy === info) cancelDart();
       });
       controller.addEventListener('selectstart', () => {
         if (dartState === 'ready') grabDart(info);
@@ -220,7 +229,9 @@
 
     const pinchPos = new THREE.Vector3();
     const aimPoint = new THREE.Vector3();
-    function updateDart() {
+    function updateDart(dt) {
+      if (dartState === 'flying') { updateFlight(dt); return; }
+
       const info = (dartState === 'held') ? heldBy : getDartHand();
       if (!info) { dart.visible = false; return; }
       dart.visible = true;
@@ -228,6 +239,9 @@
       getPinchPoint(info, pinchPos);
       if (dartState === 'ready') pinchPos.y += 0.05; // float just above your fingers
       dart.position.copy(pinchPos);
+
+      // While holding, remember where the hand was (used to measure the flick)
+      if (dartState === 'held') recordHandSample(pinchPos);
 
       // Point the dart at the target you're looking at, or straight ahead
       if (gazedTarget) {
@@ -239,6 +253,81 @@
       dart.lookAt(aimPoint);
     }
 
+    // ---------- STAGE 4: FLICK TO THROW ----------
+    // Settings you can tweak later on the real headset:
+    const TEST_MODE = true;      // true = emulator test: any release throws. Set to false on the real Quest.
+    const MIN_FLICK_SPEED = 0.8; // how fast (metres/second) your hand must move to count as a throw
+    const GRAVITY = 4.0;         // gentle gravity (real life is 9.8) so throws feel forgiving
+    const AIM_ASSIST = 0.75;     // 0 = only your hand direction, 1 = straight at the target you look at
+
+    const handSamples = [];      // hand positions from the last 0.1 seconds
+    const dartVel = new THREE.Vector3(); // dart speed + direction while flying
+    let flightTime = 0;
+
+    function recordHandSample(pos) {
+      const now = performance.now();
+      handSamples.push({ p: pos.clone(), t: now });
+      while (handSamples.length > 2 && now - handSamples[0].t > 100) handSamples.shift();
+    }
+
+    // Hand speed = how far the hand moved, divided by how long it took
+    function getHandVelocity() {
+      if (handSamples.length < 2) return new THREE.Vector3();
+      const first = handSamples[0];
+      const last = handSamples[handSamples.length - 1];
+      const seconds = (last.t - first.t) / 1000;
+      if (seconds <= 0) return new THREE.Vector3();
+      return last.p.clone().sub(first.p).divideScalar(seconds);
+    }
+
+    function throwDart(handVel) {
+      let handSpeed = handVel.length();
+
+      if (handSpeed < MIN_FLICK_SPEED) {
+        if (!TEST_MODE) { cancelDart(); return; } // gentle let-go = no throw
+        handSpeed = 1.5;            // emulator: pretend you flicked
+        handVel.copy(eyeDir);       // ...in the direction you're looking
+      }
+
+      // Turn a small hand flick into a satisfying dart speed (3 to 9 m/s)
+      const dartSpeed = THREE.MathUtils.clamp(handSpeed * 3, 3, 9);
+      const dir = handVel.clone().normalize();
+
+      if (gazedTarget) {
+        // Aim assist: bend the throw toward the target you're looking at
+        gazedTarget.getWorldPosition(aimPoint);
+        const toTarget = aimPoint.clone().sub(dart.position);
+        const distance = toTarget.length();
+        dir.lerp(toTarget.normalize(), AIM_ASSIST).normalize();
+        dartVel.copy(dir).multiplyScalar(dartSpeed);
+        // Aim a little higher so gravity drops the dart onto the target
+        dartVel.y += 0.5 * GRAVITY * (distance / dartSpeed);
+      } else {
+        dartVel.copy(dir).multiplyScalar(dartSpeed);
+      }
+
+      dartState = 'flying';
+      flightTime = 0;
+      setDartSolid(true);
+    }
+
+    // Move the flying dart a little each frame
+    function updateFlight(dt) {
+      flightTime += dt;
+      dartVel.y -= GRAVITY * dt;                 // gravity pulls it down
+      dart.position.addScaledVector(dartVel, dt); // move it
+      aimPoint.copy(dart.position).add(dartVel);
+      dart.lookAt(aimPoint);                      // nose points where it's going
+
+      // After 2 seconds, or if it falls below the floor, give a new dart
+      if (flightTime > 2 || dart.position.y < 0) resetDart();
+    }
+
+    function resetDart() {
+      dartState = 'ready';
+      setDartSolid(false);
+    }
+
     // ---------- WINDOW RESIZE ----------
     window.addEventListener('resize', () => {
       camera.aspect = innerWidth / innerHeight;
@@ -247,9 +336,11 @@
     });
 
     // ---------- GAME LOOP (runs every frame) ----------
+    const clock = new THREE.Clock();
     renderer.setAnimationLoop(() => {
+      const dt = Math.min(clock.getDelta(), 0.05); // seconds since last frame
       updateGaze();
-      updateDart();
+      updateDart(dt);
       renderer.render(scene, camera);
     });
   </script>
