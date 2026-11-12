@@ -131,4 +131,127 @@
       body.rotation.x = Math.PI / 2;
       body.position.z = 0.01;
 
-      const flight1 = new THREE.Mesh(new
+      const flight1 = new THREE.Mesh(new THREE.PlaneGeometry(0.04, 0.035), mat(0xff3b6b));
+      flight1.rotation.y = Math.PI / 2;
+      flight1.position.z = -0.03;
+
+      const flight2 = new THREE.Mesh(new THREE.PlaneGeometry(0.035, 0.04), mat(0xff3b6b));
+      flight2.rotation.x = Math.PI / 2;
+      flight2.position.z = -0.03;
+
+      dart.add(tip, body, flight1, flight2);
+      return dart;
+    }
+
+    const dart = makeDart();
+    dart.visible = false;
+    scene.add(dart);
+
+    let dartState = 'ready'; // 'ready' = floating near your hand, 'held' = pinched
+    let heldBy = null;       // which hand is holding it
+
+    // See-through when ready, solid when held
+    function setDartSolid(solid) {
+      dart.traverse(o => { if (o.material) o.material.opacity = solid ? 1 : 0.45; });
+    }
+    setDartSolid(false);
+
+    function grabDart(info) {
+      dartState = 'held';
+      heldBy = info;
+      setDartSolid(true);
+    }
+
+    function releaseDart() {
+      dartState = 'ready';  // Stage 4 will replace this with a real throw
+      heldBy = null;
+      setDartSolid(false);
+    }
+
+    // Set up both hands. A pinch sends "selectstart"; letting go sends "selectend".
+    const handFactory = new XRHandModelFactory();
+    const hands = [];
+    for (let i = 0; i < 2; i++) {
+      const controller = renderer.xr.getController(i);
+      const hand = renderer.xr.getHand(i);
+      hand.add(handFactory.createHandModel(hand, 'spheres')); // little balls on your finger joints
+      scene.add(controller);
+      scene.add(hand);
+
+      const info = { controller, hand, handedness: null, connected: false, isHand: false };
+      hands.push(info);
+
+      controller.addEventListener('connected', (e) => {
+        info.connected = true;
+        info.handedness = e.data.handedness; // 'left' or 'right'
+        info.isHand = !!e.data.hand;         // true = real hand, false = controller
+      });
+      controller.addEventListener('disconnected', () => {
+        info.connected = false;
+        if (heldBy === info) releaseDart();
+      });
+      controller.addEventListener('selectstart', () => {
+        if (dartState === 'ready') grabDart(info);
+      });
+      controller.addEventListener('selectend', () => {
+        if (heldBy === info) releaseDart();
+      });
+    }
+
+    // Find the point between your thumb tip and index finger tip
+    const tipA = new THREE.Vector3();
+    const tipB = new THREE.Vector3();
+    function getPinchPoint(info, out) {
+      const index = info.hand.joints['index-finger-tip'];
+      const thumb = info.hand.joints['thumb-tip'];
+      if (info.isHand && index && thumb && index.visible) {
+        index.getWorldPosition(tipA);
+        thumb.getWorldPosition(tipB);
+        return out.copy(tipA).add(tipB).multiplyScalar(0.5);
+      }
+      return info.controller.getWorldPosition(out); // backup if using controllers
+    }
+
+    // The ready dart shows on your right hand (or whichever hand is visible)
+    function getDartHand() {
+      const visible = hands.filter(h => h.connected);
+      return visible.find(h => h.handedness === 'right') || visible[0] || null;
+    }
+
+    const pinchPos = new THREE.Vector3();
+    const aimPoint = new THREE.Vector3();
+    function updateDart() {
+      const info = (dartState === 'held') ? heldBy : getDartHand();
+      if (!info) { dart.visible = false; return; }
+      dart.visible = true;
+
+      getPinchPoint(info, pinchPos);
+      if (dartState === 'ready') pinchPos.y += 0.05; // float just above your fingers
+      dart.position.copy(pinchPos);
+
+      // Point the dart at the target you're looking at, or straight ahead
+      if (gazedTarget) {
+        gazedTarget.getWorldPosition(aimPoint);
+      } else {
+        camera.getWorldDirection(aimPoint);
+        aimPoint.multiplyScalar(2).add(eyePos);
+      }
+      dart.lookAt(aimPoint);
+    }
+
+    // ---------- WINDOW RESIZE ----------
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+
+    // ---------- GAME LOOP (runs every frame) ----------
+    renderer.setAnimationLoop(() => {
+      updateGaze();
+      updateDart();
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+</html>
