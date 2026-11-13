@@ -49,6 +49,7 @@
 
     renderer.xr.addEventListener('sessionstart', () => {
       document.getElementById('info').style.display = 'none';
+      showMenu('intro'); // Stage 6: start with How to Play
     });
 
     function makeTarget() {
@@ -103,7 +104,7 @@
       camera.getWorldDirection(eyeDir);
       raycaster.set(eyePos, eyeDir);
 
-      const hits = raycaster.intersectObjects(targets, true);
+      const hits = raycaster.intersectObjects(targets.filter(t => t.visible), true);
       let found = null;
       if (hits.length > 0) {
         found = hits[0].object;
@@ -202,7 +203,8 @@
         if (heldBy === info) cancelDart();
       });
       controller.addEventListener('selectstart', () => {
-        if (dartState === 'ready') grabDart(info);
+        if (gazedButton) { pressButton(gazedButton); return; } // Stage 6: menu buttons first
+        if (dartState === 'ready' && canThrow()) grabDart(info);
       });
       controller.addEventListener('selectend', () => {
         if (heldBy === info) releaseDart();
@@ -233,6 +235,7 @@
     const aimPoint = new THREE.Vector3();
     function updateDart(dt) {
       if (dartState === 'flying') { updateFlight(dt); return; }
+      if (!canThrow() && dartState !== 'held') { dart.visible = false; return; } // no dart during menus
 
       const info = (dartState === 'held') ? heldBy : getDartHand();
       if (!info) { dart.visible = false; return; }
@@ -265,6 +268,7 @@
     const handSamples = [];      // hand positions from the last 0.1 seconds
     const dartVel = new THREE.Vector3(); // dart speed + direction while flying
     let flightTime = 0;
+    let throwStartY = 0;
 
     function recordHandSample(pos) {
       const now = performance.now();
@@ -311,6 +315,7 @@
 
       dartState = 'flying';
       flightTime = 0;
+      throwStartY = dart.position.y;
       setDartSolid(true);
     }
 
@@ -326,10 +331,11 @@
       aimPoint.copy(dart.position).add(dartVel);
       dart.lookAt(aimPoint);                      // nose points where it's going
 
-      // After 2 seconds, or if it falls below the floor, it's a miss
-      if (flightTime > 2 || dart.position.y < 0) {
+      // After 2 seconds, or if it drops 1.5 m below where it was thrown, it's a miss
+      if (flightTime > 2 || dart.position.y < throwStartY - 1.5) {
         showPopup('MISS', '#ffffff', dart.position);
         resetDart();
+        onThrowResult(0);
       }
     }
 
@@ -381,13 +387,10 @@
 
       stickCopy(hitTarget);
       showPopup(result.text, result.color, hit.point);
-      lastHit = { points: result.points, target: hitTarget };  // Stage 6 will use this for scoring
-      console.log('HIT!', result.points, 'points');
-
       resetDart();
+      onThrowResult(result.points);   // Stage 6: add to the score
       return true;
     }
-    let lastHit = null;
 
     // Leave a solid copy of the dart stuck in the target; the real dart returns to your hand
     function stickCopy(hitTarget) {
@@ -443,6 +446,289 @@
       }
     }
 
+    // ---------- STAGE 6: SCORING, MENUS + HUD ----------
+    const PRACTICE_DARTS = 3;
+    const ROUND_DARTS = 10;
+
+    // mode: 'intro' | 'practice' | 'practiceDone' | 'round' | 'results'
+    const game = { mode: 'intro', thrown: 0, score: 0, hits: 0, best: 0, streak: 0, bestStreak: 0, waiting: false };
+
+    // Hand-tracking check: is at least one hand (or controller) being seen right now?
+    function handsVisible() {
+      return hands.some(h => {
+        if (!h.connected) return false;
+        if (!h.isHand) return true;
+        const wrist = h.hand.joints['wrist'];
+        return !!(wrist && wrist.visible);
+      });
+    }
+
+    function isPlaying() { return game.mode === 'practice' || game.mode === 'round'; }
+    function canThrow() { return isPlaying() && !game.waiting && handsVisible(); }
+
+    // Helper: a flat rectangle we can draw text on (like a little screen)
+    function makeCanvasPlane(width, height, pxW, pxH) {
+      const canvas = document.createElement('canvas');
+      canvas.width = pxW; canvas.height = pxH;
+      const texture = new THREE.CanvasTexture(canvas);
+      const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(width, height),
+        new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthTest: false })
+      );
+      mesh.renderOrder = 990;
+      return { mesh, canvas, ctx: canvas.getContext('2d'), texture };
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    // ----- Menu panel (How to Play, Practice done, Results) -----
+    const menu = new THREE.Group();
+    const menuPanel = makeCanvasPlane(0.9, 0.6, 900, 600);
+    const menuButton = makeCanvasPlane(0.4, 0.1, 400, 100);
+    menuButton.mesh.position.set(0, -0.2, 0.01);
+    menuButton.mesh.renderOrder = 991;
+    menu.add(menuPanel.mesh, menuButton.mesh);
+    menu.visible = false;
+    scene.add(menu);
+
+    const buttons = [menuButton.mesh];
+    let gazedButton = null;
+    let menuPlaceFrames = 0;   // wait a few frames so we know where your head is
+
+    function drawMenu(title, lines, buttonText) {
+      const c = menuPanel.ctx;
+      c.clearRect(0, 0, 900, 600);
+      roundRect(c, 10, 10, 880, 580, 40);
+      c.fillStyle = 'rgba(11, 15, 26, 0.88)'; c.fill();
+      c.lineWidth = 6; c.strokeStyle = '#ff3b6b'; c.stroke();
+
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillStyle = '#ff3b6b'; c.font = 'bold 64px Arial';
+      c.fillText(title, 450, 80);
+      c.fillStyle = '#ffffff'; c.font = '40px Arial';
+      lines.forEach((line, i) => c.fillText(line, 450, 170 + i * 56));
+      menuPanel.texture.needsUpdate = true;
+
+      const b = menuButton.ctx;
+      b.clearRect(0, 0, 400, 100);
+      roundRect(b, 4, 4, 392, 92, 46);
+      b.fillStyle = '#39ff88'; b.fill();
+      b.fillStyle = '#0b0f1a'; b.font = 'bold 40px Arial';
+      b.textAlign = 'center'; b.textBaseline = 'middle';
+      b.fillText(buttonText, 200, 52);
+      menuButton.texture.needsUpdate = true;
+    }
+
+    function showMenu(which) {
+      game.mode = which;
+      game.waiting = false;
+      if (which === 'intro') {
+        drawMenu('HOW TO PLAY', [
+          '1. Look at a target.',
+          '2. Pinch to hold a dart.',
+          '3. Flick your hand to throw.',
+          '4. Hit the center for more points.',
+          'Look at the button + pinch to start'
+        ], 'START PRACTICE');
+        menuButton.mesh.userData.action = 'startPractice';
+      } else if (which === 'practiceDone') {
+        drawMenu('PRACTICE DONE!', [
+          'Now the real round: ' + ROUND_DARTS + ' darts.',
+          'Red centre = 100',
+          'Yellow = 50   Blue = 20'
+        ], 'START ROUND');
+        menuButton.mesh.userData.action = 'startRound';
+      } else if (which === 'results') {
+        const accuracy = Math.round((game.hits / ROUND_DARTS) * 100);
+        drawMenu('ROUND COMPLETE', [
+          'Total score: ' + game.score,
+          'Best throw: ' + game.best,
+          'Accuracy: ' + accuracy + '%',
+          'Best streak: ' + game.bestStreak
+        ], 'PLAY AGAIN');
+        menuButton.mesh.userData.action = 'startRound';
+      }
+      menu.visible = true;
+      menuPlaceFrames = 3;
+      targets.forEach(t => t.visible = false);
+      hud.mesh.visible = false;
+    }
+
+    function hideMenu() {
+      menu.visible = false;
+      gazedButton = null;
+      targets.forEach(t => t.visible = true);
+      hud.mesh.visible = true;
+    }
+
+    // Put the menu 1 metre in front of where you're facing (ignores looking up/down)
+    const flatDir = new THREE.Vector3();
+    function placeMenu() {
+      camera.getWorldPosition(eyePos);
+      camera.getWorldDirection(flatDir);
+      flatDir.y = 0;
+      if (flatDir.lengthSq() < 0.001) flatDir.set(0, 0, -1);
+      flatDir.normalize();
+      menu.position.copy(eyePos).addScaledVector(flatDir, 1.0);
+      menu.position.y = eyePos.y - 0.05;
+      menu.lookAt(eyePos.x, menu.position.y, eyePos.z);
+    }
+
+    function pressButton(button) {
+      const action = button.userData.action;
+      hideMenu();
+      if (action === 'startPractice') startPractice();
+      if (action === 'startRound') startRound();
+    }
+
+    function clearStuckDarts() {
+      stuckDarts.forEach(d => d.parent && d.parent.remove(d));
+      stuckDarts.length = 0;
+    }
+
+    function resetStats() {
+      Object.assign(game, { thrown: 0, score: 0, hits: 0, best: 0, streak: 0, bestStreak: 0, waiting: false });
+    }
+
+    // Place targets in front of wherever you're facing, at a comfortable seated height
+    // (right: forward, up, left-right). Stage 7 will use real surfaces instead.
+    const TARGET_LAYOUT = [
+      { forward: 1.5, up: -0.1, side: 0 },
+      { forward: 1.6, up: -0.3, side: -0.8 }
+    ];
+    const sideDir = new THREE.Vector3();
+    function placeTargetsInFront() {
+      camera.getWorldPosition(eyePos);
+      camera.getWorldDirection(flatDir);
+      flatDir.y = 0;
+      if (flatDir.lengthSq() < 0.001) flatDir.set(0, 0, -1);
+      flatDir.normalize();
+      sideDir.set(-flatDir.z, 0, flatDir.x); // points to your right
+      targets.forEach((t, i) => {
+        const L = TARGET_LAYOUT[i];
+        t.position.copy(eyePos)
+          .addScaledVector(flatDir, L.forward)
+          .addScaledVector(sideDir, L.side);
+        t.position.y = eyePos.y + L.up;
+        t.lookAt(eyePos);  // face the player
+      });
+    }
+
+    function startPractice() {
+      clearStuckDarts(); resetStats();
+      placeTargetsInFront();
+      game.mode = 'practice';
+      drawHud();
+    }
+
+    function startRound() {
+      clearStuckDarts(); resetStats();
+      placeTargetsInFront();
+      game.mode = 'round';
+      drawHud();
+    }
+
+    // Called once after every throw (hit = points, miss = 0)
+    function onThrowResult(points) {
+      if (!isPlaying()) return;
+      game.thrown++;
+
+      if (game.mode === 'round') {
+        game.score += points;
+        game.best = Math.max(game.best, points);
+        if (points > 0) {
+          game.hits++;
+          game.streak++;
+          game.bestStreak = Math.max(game.bestStreak, game.streak);
+        } else {
+          game.streak = 0;
+        }
+      }
+      drawHud();
+
+      const total = game.mode === 'practice' ? PRACTICE_DARTS : ROUND_DARTS;
+      if (game.thrown >= total) {
+        game.waiting = true; // short pause so you can see your last score popup
+        const next = game.mode === 'practice' ? 'practiceDone' : 'results';
+        setTimeout(() => showMenu(next), 1500);
+      }
+    }
+
+    // ----- HUD: small score bar fixed near the bottom of your view -----
+    const hud = makeCanvasPlane(0.6, 0.12, 1000, 200);
+    hud.mesh.position.set(0, -0.32, -1);
+    hud.mesh.onBeforeRender = () => hud.mesh.updateMatrixWorld();
+    hud.mesh.visible = false;
+    camera.add(hud.mesh);
+
+    function drawHud() {
+      const c = hud.ctx;
+      const total = game.mode === 'practice' ? PRACTICE_DARTS : ROUND_DARTS;
+      c.clearRect(0, 0, 1000, 200);
+      roundRect(c, 10, 10, 980, 180, 40);
+      c.fillStyle = 'rgba(11, 15, 26, 0.7)'; c.fill();
+
+      c.textBaseline = 'middle'; c.textAlign = 'left';
+      c.fillStyle = '#ff3b6b'; c.font = 'bold 48px Arial';
+      c.fillText(game.mode === 'practice' ? 'PRACTICE' : 'SCORE ' + game.score, 40, 70);
+      c.textAlign = 'right'; c.fillStyle = '#ffffff'; c.font = '44px Arial';
+      c.fillText('Dart ' + Math.min(game.thrown + 1, total) + ' / ' + total, 960, 70);
+
+      // Progress bar: one block per dart
+      const gap = 10, barW = 920, w = (barW - gap * (total - 1)) / total;
+      for (let i = 0; i < total; i++) {
+        c.fillStyle = i < game.thrown ? '#39ff88' : 'rgba(255,255,255,0.25)';
+        roundRect(c, 40 + i * (w + gap), 125, w, 36, 10);
+        c.fill();
+      }
+      hud.texture.needsUpdate = true;
+    }
+
+    // ----- "Hands not detected" message -----
+    const handsMsg = makeCanvasPlane(0.6, 0.12, 1000, 200);
+    handsMsg.mesh.position.set(0, 0.08, -1);
+    handsMsg.mesh.onBeforeRender = () => handsMsg.mesh.updateMatrixWorld();
+    handsMsg.mesh.visible = false;
+    camera.add(handsMsg.mesh);
+    (() => {
+      const c = handsMsg.ctx;
+      roundRect(c, 10, 10, 980, 180, 40);
+      c.fillStyle = 'rgba(11, 15, 26, 0.85)'; c.fill();
+      c.lineWidth = 6; c.strokeStyle = '#ffd23f'; c.stroke();
+      c.fillStyle = '#ffffff'; c.font = 'bold 44px Arial';
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('Hands not detected.', 500, 70);
+      c.fillText('Bring your hands into view.', 500, 130);
+      handsMsg.texture.needsUpdate = true;
+    })();
+
+    // Runs every frame: menu placement, button gaze, hands message
+    const buttonScaleBig = new THREE.Vector3(1.08, 1.08, 1);
+    function updateUI() {
+      if (menu.visible && menuPlaceFrames > 0) {
+        menuPlaceFrames--;
+        placeMenu();
+      }
+
+      gazedButton = null;
+      if (menu.visible) {
+        const hits = raycaster.intersectObjects(buttons, false);
+        if (hits.length > 0) gazedButton = hits[0].object;
+      }
+      buttons.forEach(b => b.scale.lerp(b === gazedButton ? buttonScaleBig : normalSize, 0.2));
+      if (gazedButton) gazeDot.material.color.set(0x39ff88);
+
+      handsMsg.mesh.visible = renderer.xr.isPresenting && isPlaying() && !handsVisible();
+    }
+
     // ---------- WINDOW RESIZE ----------
     window.addEventListener('resize', () => {
       camera.aspect = innerWidth / innerHeight;
@@ -455,6 +741,7 @@
     renderer.setAnimationLoop(() => {
       const dt = Math.min(clock.getDelta(), 0.05); // seconds since last frame
       updateGaze();
+      updateUI();
       updateDart(dt);
       updatePopups(dt);
       renderer.render(scene, camera);
