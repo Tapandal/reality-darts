@@ -315,17 +315,129 @@
     function updateFlight(dt) {
       flightTime += dt;
       dartVel.y -= GRAVITY * dt;                 // gravity pulls it down
+
+      // STAGE 5: before moving, check if the dart's path crosses a target this frame
+      if (checkTargetHit(dt)) return;
+
       dart.position.addScaledVector(dartVel, dt); // move it
       aimPoint.copy(dart.position).add(dartVel);
       dart.lookAt(aimPoint);                      // nose points where it's going
 
-      // After 2 seconds, or if it falls below the floor, give a new dart
-      if (flightTime > 2 || dart.position.y < 0) resetDart();
+      // After 2 seconds, or if it falls below the floor, it's a miss
+      if (flightTime > 2 || dart.position.y < 0) {
+        showPopup('MISS', '#ffffff', dart.position);
+        resetDart();
+      }
     }
 
     function resetDart() {
       dartState = 'ready';
       setDartSolid(false);
+    }
+
+    // ---------- STAGE 5: HITTING + STICKING ----------
+    const DART_TIP = 0.09;          // distance from the dart's middle to its tip (metres)
+    const MAX_STUCK = 10;           // how many darts can stay stuck at once
+    const stuckDarts = [];
+    const hitRay = new THREE.Raycaster();
+    const moveDir = new THREE.Vector3();
+    const localHit = new THREE.Vector3();
+
+    // Ring sizes match makeTarget(): red 0.06, yellow 0.15, blue 0.25
+    function ringScore(distanceFromCentre) {
+      if (distanceFromCentre <= 0.06) return { points: 100, text: 'BULLSEYE! +100', color: '#ff2d55' };
+      if (distanceFromCentre <= 0.15) return { points: 50,  text: '+50',            color: '#ffd23f' };
+      if (distanceFromCentre <= 0.25) return { points: 20,  text: '+20',            color: '#2f7bff' };
+      return null;
+    }
+
+    function checkTargetHit(dt) {
+      // Shoot a short invisible line from the dart forward, as long as this frame's move + the tip
+      moveDir.copy(dartVel).normalize();
+      hitRay.set(dart.position, moveDir);
+      hitRay.far = dartVel.length() * dt + DART_TIP;
+
+      const hits = hitRay.intersectObjects(targets, true)
+        .filter(h => !h.object.userData.isStuckDart);   // ignore darts already stuck there
+      if (hits.length === 0) return false;
+
+      const hit = hits[0];
+      let hitTarget = hit.object;
+      while (hitTarget.parent && !targets.includes(hitTarget)) hitTarget = hitTarget.parent;
+
+      // How far from the centre did it land? (measured on the target itself)
+      localHit.copy(hit.point);
+      hitTarget.worldToLocal(localHit);
+      const result = ringScore(Math.hypot(localHit.x, localHit.y));
+      if (!result) return false;   // touched the edge only, keep flying
+
+      // Put the dart so its tip sinks slightly into the board
+      dart.position.copy(hit.point).addScaledVector(moveDir, -(DART_TIP - 0.015));
+      aimPoint.copy(hit.point).add(moveDir);
+      dart.lookAt(aimPoint);
+
+      stickCopy(hitTarget);
+      showPopup(result.text, result.color, hit.point);
+      lastHit = { points: result.points, target: hitTarget };  // Stage 6 will use this for scoring
+      console.log('HIT!', result.points, 'points');
+
+      resetDart();
+      return true;
+    }
+    let lastHit = null;
+
+    // Leave a solid copy of the dart stuck in the target; the real dart returns to your hand
+    function stickCopy(hitTarget) {
+      const copy = dart.clone(true);
+      copy.traverse(o => {
+        o.userData.isStuckDart = true;
+        if (o.material) { o.material = o.material.clone(); o.material.opacity = 1; }
+      });
+      hitTarget.attach(copy);   // becomes part of the target, so it moves with it later
+      stuckDarts.push(copy);
+      if (stuckDarts.length > MAX_STUCK) {
+        const oldest = stuckDarts.shift();
+        oldest.parent.remove(oldest);
+      }
+    }
+
+    // Floating score text that rises and fades out
+    const popups = [];
+    function showPopup(text, color, position) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.font = 'bold 72px Arial';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.lineWidth = 10; ctx.strokeStyle = '#000000';
+      ctx.strokeText(text, 256, 64);
+      ctx.fillStyle = color;
+      ctx.fillText(text, 256, 64);
+
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false
+      }));
+      sprite.scale.set(0.4, 0.1, 1);
+      sprite.position.copy(position);
+      sprite.position.y += 0.15;
+      sprite.renderOrder = 998;
+      scene.add(sprite);
+      popups.push({ sprite, age: 0 });
+    }
+
+    function updatePopups(dt) {
+      for (let i = popups.length - 1; i >= 0; i--) {
+        const p = popups[i];
+        p.age += dt;
+        p.sprite.position.y += 0.15 * dt;              // float up
+        p.sprite.material.opacity = 1 - p.age / 1.2;   // fade out
+        if (p.age > 1.2) {
+          scene.remove(p.sprite);
+          p.sprite.material.map.dispose();
+          p.sprite.material.dispose();
+          popups.splice(i, 1);
+        }
+      }
     }
 
     // ---------- WINDOW RESIZE ----------
@@ -341,6 +453,7 @@
       const dt = Math.min(clock.getDelta(), 0.05); // seconds since last frame
       updateGaze();
       updateDart(dt);
+      updatePopups(dt);
       renderer.render(scene, camera);
     });
   </script>
