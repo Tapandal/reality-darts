@@ -36,7 +36,7 @@
     const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
     camera.position.set(0, 1.2, 0);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     renderer.setPixelRatio(devicePixelRatio);
     renderer.setSize(innerWidth, innerHeight);
     renderer.xr.enabled = true;
@@ -49,8 +49,21 @@
 
     renderer.xr.addEventListener('sessionstart', () => {
       document.getElementById('info').style.display = 'none';
+      initAudio(); // Stage 9: sound + music
       showMenu('intro'); // Stage 6: start with How to Play
     });
+
+    // A round soft-glow picture made once and shared by all targets
+    const glowMaterial = (() => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 128;
+      const g = c.getContext('2d');
+      const grad = g.createRadialGradient(64, 64, 30, 64, 64, 64);
+      grad.addColorStop(0, 'rgba(255, 90, 160, 0.55)');
+      grad.addColorStop(1, 'rgba(255, 90, 160, 0)');
+      g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+      return new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false });
+    })();
 
     function makeTarget() {
       const target = new THREE.Group();
@@ -59,6 +72,12 @@
         { radius: 0.15, color: 0xffd23f },
         { radius: 0.06, color: 0xff2d55 }
       ];
+      // Stage 9: soft neon glow behind the board (not hittable)
+      const glow = new THREE.Mesh(new THREE.CircleGeometry(0.36, 48), glowMaterial);
+      glow.position.z = -0.003;
+      glow.raycast = () => {};
+      glow.userData.isGlow = true;
+      target.add(glow);
       rings.forEach((ring, i) => {
         const mesh = new THREE.Mesh(
           new THREE.CircleGeometry(ring.radius, 48),
@@ -314,6 +333,7 @@
         dartVel.copy(dir).multiplyScalar(dartSpeed);
       }
 
+      sfxThrow();
       dartState = 'flying';
       flightTime = 0;
       throwStartY = dart.position.y;
@@ -335,6 +355,7 @@
       // After 2 seconds, or if it drops 1.5 m below where it was thrown, it's a miss
       if (flightTime > 2 || dart.position.y < throwStartY - 1.5) {
         showPopup('MISS', '#ffffff', dart.position);
+        sfxMiss();
         resetDart();
         onThrowResult(0, null);
       }
@@ -382,6 +403,7 @@
         dart.position.copy(hit.point).addScaledVector(moveDir, -(DART_TIP - 0.015));
         stickCopy(hitTarget);
         showPopup('BLOCKED', '#ff3b6b', hit.point);
+        sfxThud();
         resetDart();
         onThrowResult(0, hitTarget);
         return true;
@@ -405,6 +427,8 @@
 
       stickCopy(hitTarget);
       showPopup(result.text, result.color, hit.point);
+      sfxHit(result.points);
+      spawnBurst(hit.point, result.color);
       resetDart();
       onThrowResult(result.points, hitTarget);   // Stage 6: add to the score
       return true;
@@ -513,7 +537,7 @@
     // ----- Menu panel (How to Play, Practice done, Results) -----
     const menu = new THREE.Group();
     const menuPanel = makeCanvasPlane(0.9, 0.6, 900, 600);
-    const menuButtons = [makeCanvasPlane(0.4, 0.1, 400, 100), makeCanvasPlane(0.4, 0.1, 400, 100)];
+    const menuButtons = [0, 1, 2, 3].map(() => makeCanvasPlane(0.4, 0.1, 400, 100));
     menu.add(menuPanel.mesh);
     menuButtons.forEach(b => { b.mesh.renderOrder = 991; menu.add(b.mesh); });
     menu.visible = false;
@@ -543,11 +567,14 @@
         button.mesh.visible = !!info;
         if (!info) return;
         button.mesh.userData.action = info.action;
-        button.mesh.position.set(btns.length === 2 ? (i === 0 ? -0.215 : 0.215) : 0, -0.2, 0.01);
+        // 1 button: centre. 2: side by side. 3-4: two rows of two.
+        const col = btns.length === 1 ? 0 : (i % 2 === 0 ? -0.215 : 0.215);
+        const row = btns.length <= 2 ? -0.2 : (i < 2 ? -0.11 : -0.23);
+        button.mesh.position.set(col, row, 0.01);
         const b = button.ctx;
         b.clearRect(0, 0, 400, 100);
         roundRect(b, 4, 4, 392, 92, 46);
-        b.fillStyle = i === 0 ? '#39ff88' : '#ffd23f'; b.fill();
+        b.fillStyle = info.color || (i === 0 ? '#39ff88' : '#ffd23f'); b.fill();
         b.fillStyle = '#0b0f1a'; b.font = 'bold 38px Arial';
         b.textAlign = 'center'; b.textBaseline = 'middle';
         b.fillText(info.text, 200, 52);
@@ -565,7 +592,7 @@
           '3. Flick your hand to throw.',
           '4. Hit the center for more points.',
           'Look at the button + pinch to start'
-        ], [{ text: 'START PRACTICE', action: 'startPractice' }]);
+        ], [{ text: 'START PRACTICE', action: 'startPractice' }, { text: 'SETTINGS', action: 'settings', color: '#4fd8ff' }]);
       } else if (which === 'practiceDone') {
         drawMenu('PRACTICE DONE!', [
           'Now the real round: ' + ROUND_DARTS + ' darts.',
@@ -581,16 +608,41 @@
           'Best streak: ' + game.bestStreak
         ], [{ text: 'PLAY AGAIN', action: 'startRound' }, { text: 'TRICK SHOTS', action: 'startTrick' }]);
         game.trickUnlocked = true;   // Stage 8: Trick Shot mode unlocks after your first round
+        sfxFanfare();
       } else if (which === 'trickIntro') {
         const t = TRICKS[trick.stage];
         drawMenu('TRICK ' + (trick.stage + 1) + '/3: ' + t.name, t.intro, [{ text: 'GO!', action: 'trickGo' }]);
       } else if (which === 'trickResults') {
         drawTrickResults();
+        sfxFanfare();
+      } else if (which === 'pause') {
+        drawMenu('PAUSED', ['Take a break!', 'Look at a button and pinch.'], [
+          { text: 'RESUME', action: 'resume' },
+          { text: 'RESTART', action: 'restart', color: '#ffd23f' },
+          { text: 'HOW TO PLAY', action: 'howto', color: '#b59bff' },
+          { text: 'SETTINGS', action: 'settings', color: '#4fd8ff' }]);
+      } else if (which === 'howto') {
+        drawMenu('HOW TO PLAY', [
+          '1. Look at a target.',
+          '2. Pinch to hold a dart.',
+          '3. Flick your hand to throw.',
+          '4. Hit the center for more points.'
+        ], [{ text: 'BACK', action: 'back' }]);
+      } else if (which === 'settings') {
+        drawMenu('SETTINGS', [
+          'Pinch a button to change it.',
+          'Distance applies to the next round.'
+        ], [
+          { text: 'SOUND: ' + (settings.sound ? 'ON' : 'OFF'), action: 'toggleSound', color: '#4fd8ff' },
+          { text: 'MUSIC: ' + (settings.music ? 'ON' : 'OFF'), action: 'toggleMusic', color: '#4fd8ff' },
+          { text: 'DIST: ' + DISTANCES[settings.distanceIndex].name, action: 'cycleDistance', color: '#4fd8ff' },
+          { text: 'BACK', action: 'back' }]);
       }
       menu.visible = true;
       menuPlaceFrames = 3;
       targets.forEach(t => t.visible = false);
       hud.mesh.visible = false;
+      pauseButton.visible = false;
     }
 
     function hideMenu() {
@@ -615,6 +667,9 @@
 
     function pressButton(button) {
       const action = button.userData.action;
+      if (action === 'pause' && dartState === 'flying') return; // wait for the dart to land
+      sfxClick();
+      if (handleMenuAction(action)) return;   // Stage 9: pause / settings buttons
       hideMenu();
       if (action === 'startPractice') startPractice();
       if (action === 'startRound') startRound();
@@ -633,18 +688,22 @@
 
     function startPractice() {
       clearStuckDarts(); resetStats();
+      lastPlay = 'practice';
       activeTargets = mainTargets;
       targets.forEach(t => t.visible = activeTargets.includes(t));
       placeTargets();
+      placePauseButton();
       game.mode = 'practice';
       drawHud();
     }
 
     function startRound() {
       clearStuckDarts(); resetStats();
+      lastPlay = 'round';
       activeTargets = mainTargets;
       targets.forEach(t => t.visible = activeTargets.includes(t));
       placeTargets();
+      placePauseButton();
       game.mode = 'round';
       drawHud();
     }
@@ -734,10 +793,13 @@
       }
 
       gazedButton = null;
-      if (menu.visible) {
-        const hits = raycaster.intersectObjects(buttons.filter(b => b.visible), false);
+      pauseButton.visible = renderer.xr.isPresenting && isPlaying() && !game.waiting;
+      const clickable = menu.visible ? buttons.filter(b => b.visible) : (pauseButton.visible ? [pauseButton] : []);
+      if (clickable.length) {
+        const hits = raycaster.intersectObjects(clickable, false);
         if (hits.length > 0) gazedButton = hits[0].object;
       }
+      pauseButton.scale.lerp(gazedButton === pauseButton ? buttonScaleBig : normalSize, 0.2);
       buttons.forEach(b => b.scale.lerp(b === gazedButton ? buttonScaleBig : normalSize, 0.2));
       if (gazedButton) gazeDot.material.color.set(0x39ff88);
 
@@ -862,6 +924,7 @@
       bounceNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
       dartVel.reflect(bounceNormal).multiplyScalar(0.45);
       showPopup('TOO HARD!', '#ffd23f', hit.point);
+      sfxThud(); sfxBounce();
     }
 
     // ----- Room surfaces (Quest 3 / 3S "plane detection") -----
@@ -938,7 +1001,9 @@
     }
 
     // Place a target at (forward, up, side) metres from your eyes, facing you
+    let forwardLimit = Infinity;   // stay in front of a detected wall
     function placeRelative(t, forward, up, side) {
+      forward = Math.min(forward * DISTANCES[settings.distanceIndex].scale, forwardLimit);
       t.position.copy(eyePos).addScaledVector(flatDir, forward).addScaledVector(sideDir, side);
       t.position.y = eyePos.y + up;
       t.lookAt(eyePos.x, t.position.y, eyePos.z);
@@ -955,6 +1020,7 @@
 
       const wall = findWall();
       const table = findTable();
+      forwardLimit = wall ? wall.distance - 0.2 : Infinity;
       let maxForward = 2.0;  // floating targets must stay in front of any wall
 
       // 1. Straight Throw: on the wall, or 2 m in front of you
@@ -1092,6 +1158,7 @@
       flatDir.normalize();
       sideDir.set(-flatDir.z, 0, flatDir.x);
       const wall = findWall();
+      forwardLimit = wall ? wall.distance - 0.2 : Infinity;
       return wall ? Math.min(1, (wall.distance - 0.2) / 2.0) : 1;
     }
 
@@ -1123,6 +1190,8 @@
         resetChain(k);
       }
       activeTargets = TRICK_TARGETS[trick.stage];
+      lastPlay = 'trick';
+      placePauseButton();
       game.mode = 'trick';
       game.waiting = false;
       hideMenu();
@@ -1144,6 +1213,8 @@
       bouncedOff = panel;   // don't hit the same panel twice
       bankBounced = true;
       showPopup('BOUNCE!', '#4fd8ff', hit.point);
+      sfxBounce();
+      spawnBurst(hit.point, '#4fd8ff');
     }
 
     // Green dashed guide line: hand -> bounce panel -> where the dart will go
@@ -1173,7 +1244,7 @@
     const CHAIN_SPOTS = [[1.7, 0.25, -0.6], [1.9, -0.1, 0.05], [1.7, 0.3, 0.65]];
     function setFaded(t, faded) {
       t.traverse(o => {
-        if (o.isMesh && o.material && !o.userData.isStuckDart) {
+        if (o.isMesh && o.material && !o.userData.isStuckDart && !o.userData.isGlow) {
           o.material.transparent = true;
           o.material.opacity = faded ? 0.25 : 1;
         }
@@ -1231,6 +1302,7 @@
             trick.score = 300 + bonus;
             trick.hits = 3;
             showPopup('CHAIN COMPLETE! +' + (300 + bonus), '#39ff88', where);
+            sfxFanfare();
           } else {
             highlightChain();
           }
@@ -1313,6 +1385,264 @@
       updateGuide();
     }
 
+    // ---------- STAGE 9: SOUND, SETTINGS, PAUSE + POLISH ----------
+    // ----- Settings (remembered on this headset) -----
+    const DISTANCES = [
+      { name: 'NEAR', scale: 0.8 },
+      { name: 'NORMAL', scale: 1.0 },
+      { name: 'FAR', scale: 1.25 }
+    ];
+    const settings = { sound: true, music: true, distanceIndex: 1 };
+    try {
+      const saved = JSON.parse(localStorage.getItem('realityDartsSettings') || '{}');
+      Object.assign(settings, saved);
+    } catch (e) { /* storage not available: use defaults */ }
+    function saveSettings() {
+      try { localStorage.setItem('realityDartsSettings', JSON.stringify(settings)); } catch (e) {}
+    }
+
+    // ----- Pause button: small world button, low on your left -----
+    const pausePlane = makeCanvasPlane(0.17, 0.07, 340, 140);
+    const pauseButton = pausePlane.mesh;
+    pauseButton.userData.action = 'pause';
+    pauseButton.visible = false;
+    scene.add(pauseButton);
+    (() => {
+      const c = pausePlane.ctx;
+      roundRect(c, 4, 4, 332, 132, 60);
+      c.fillStyle = 'rgba(11, 15, 26, 0.8)'; c.fill();
+      c.lineWidth = 6; c.strokeStyle = '#ffffff'; c.stroke();
+      c.fillStyle = '#ffffff'; c.font = 'bold 54px Arial';
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText('II  PAUSE', 170, 72);
+      pausePlane.texture.needsUpdate = true;
+    })();
+    function placePauseButton() {
+      camera.getWorldPosition(eyePos);
+      pauseButton.position.copy(eyePos).addScaledVector(flatDir, 0.9).addScaledVector(sideDir, -0.42);
+      pauseButton.position.y = eyePos.y - 0.4;
+      pauseButton.lookAt(eyePos);
+    }
+
+    let lastPlay = 'round';       // what RESTART / RESUME go back to
+    let settingsReturn = 'intro'; // where BACK goes from settings
+    let pausedTargets = [];
+
+    // Returns true if the button was a pause/settings action (handled here)
+    function handleMenuAction(action) {
+      if (action === 'pause') {
+        pausedTargets = activeTargets;
+        showMenu('pause');
+        return true;
+      }
+      if (action === 'resume') {
+        hideMenu();
+        game.mode = lastPlay === 'trick' ? 'trick' : lastPlay;
+        drawHud();
+        return true;
+      }
+      if (action === 'restart') {
+        hideMenu();
+        if (lastPlay === 'practice') startPractice();
+        else if (lastPlay === 'trick') trickGo();
+        else startRound();
+        return true;
+      }
+      if (action === 'howto') { showMenu('howto'); return true; }
+      if (action === 'settings') {
+        settingsReturn = game.mode === 'pause' ? 'pause' : 'intro';
+        showMenu('settings');
+        return true;
+      }
+      if (action === 'back') {
+        showMenu(game.mode === 'howto' ? 'pause' : settingsReturn);
+        return true;
+      }
+      if (action === 'toggleSound') { settings.sound = !settings.sound; applyAudioSettings(); saveSettings(); showMenu('settings'); return true; }
+      if (action === 'toggleMusic') { settings.music = !settings.music; applyAudioSettings(); saveSettings(); showMenu('settings'); return true; }
+      if (action === 'cycleDistance') {
+        settings.distanceIndex = (settings.distanceIndex + 1) % DISTANCES.length;
+        saveSettings(); showMenu('settings');
+        return true;
+      }
+      return false;
+    }
+
+    // ----- Sound: every sound is made by code, so there are no copyright worries -----
+    const audio = { ctx: null, sfx: null, music: null, noise: null, chordTimer: null };
+    function initAudio() {
+      try {
+        if (!audio.ctx) {
+          audio.ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const master = audio.ctx.createGain();
+          master.connect(audio.ctx.destination);
+          audio.sfx = audio.ctx.createGain(); audio.sfx.connect(master);
+          audio.music = audio.ctx.createGain(); audio.music.connect(master);
+          // One second of white noise, reused for whooshes and thuds
+          const len = audio.ctx.sampleRate;
+          audio.noise = audio.ctx.createBuffer(1, len, audio.ctx.sampleRate);
+          const data = audio.noise.getChannelData(0);
+          for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+          startMusic();
+        }
+        audio.ctx.resume();
+        applyAudioSettings();
+      } catch (e) { console.warn('Sound not available', e); }
+    }
+    // The browser only allows sound after a click, so we switch it on at the first click
+    document.addEventListener('click', initAudio, true);
+
+    function applyAudioSettings() {
+      if (!audio.ctx) return;
+      const now = audio.ctx.currentTime;
+      audio.sfx.gain.setTargetAtTime(settings.sound ? 0.8 : 0, now, 0.05);
+      audio.music.gain.setTargetAtTime(settings.sound && settings.music ? 0.12 : 0, now, 0.3);
+    }
+
+    // A single beep: frequency, length (s), wave shape, volume, delay, optional slide to another pitch
+    function tone(freq, dur, type, vol, delay = 0, slideTo = 0) {
+      if (!audio.ctx || !settings.sound) return;
+      const t = audio.ctx.currentTime + delay;
+      const osc = audio.ctx.createOscillator();
+      const g = audio.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t);
+      if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g); g.connect(audio.sfx);
+      osc.start(t); osc.stop(t + dur + 0.05);
+    }
+
+    // A burst of filtered noise (whoosh / thud)
+    function noiseBurst(dur, vol, filterType, freqFrom, freqTo) {
+      if (!audio.ctx || !settings.sound) return;
+      const t = audio.ctx.currentTime;
+      const src = audio.ctx.createBufferSource();
+      src.buffer = audio.noise;
+      const f = audio.ctx.createBiquadFilter();
+      f.type = filterType; f.Q.value = 1.2;
+      f.frequency.setValueAtTime(freqFrom, t);
+      f.frequency.exponentialRampToValueAtTime(freqTo, t + dur);
+      const g = audio.ctx.createGain();
+      g.gain.setValueAtTime(vol, t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      src.connect(f); f.connect(g); g.connect(audio.sfx);
+      src.start(t, Math.random() * 0.5); src.stop(t + dur + 0.05);
+    }
+
+    function sfxThrow()  { noiseBurst(0.22, 0.35, 'bandpass', 700, 2600); }
+    function sfxThud()   { tone(150, 0.14, 'sine', 0.6, 0, 70); noiseBurst(0.06, 0.25, 'lowpass', 2000, 400); }
+    function sfxMiss()   { tone(330, 0.3, 'triangle', 0.2, 0, 160); }
+    function sfxBounce() { tone(1100, 0.1, 'square', 0.08, 0, 1800); }
+    function sfxClick()  { tone(880, 0.06, 'sine', 0.25); }
+    function sfxHit(points) {
+      sfxThud();
+      // Higher score = brighter chime
+      const notes = points >= 150 ? [784, 988, 1175, 1568]
+                  : points >= 100 ? [880, 1320, 1760]
+                  : points >= 50  ? [660, 990]
+                  : [520];
+      notes.forEach((n, i) => tone(n, 0.35, 'triangle', 0.18, 0.05 + i * 0.07));
+    }
+    function sfxFanfare() {
+      [523, 659, 784, 1047].forEach((n, i) => tone(n, 0.4, 'triangle', 0.2, i * 0.1));
+    }
+
+    // Calm background music: slow, soft chords that change every 6 seconds
+    const CHORDS = [
+      [261.6, 329.6, 392.0, 493.9],  // C major 7
+      [220.0, 261.6, 329.6, 392.0],  // A minor 7
+      [174.6, 220.0, 261.6, 329.6],  // F major 7
+      [196.0, 246.9, 293.7, 392.0]   // G
+    ];
+    let chordIndex = 0;
+    function playChord() {
+      if (!audio.ctx || audio.ctx.state !== 'running') return;
+      const t = audio.ctx.currentTime;
+      const filter = audio.ctx.createBiquadFilter();
+      filter.type = 'lowpass'; filter.frequency.value = 900;
+      filter.connect(audio.music);
+      CHORDS[chordIndex].forEach(freq => {
+        [0, 4].forEach(detune => {   // two slightly different oscillators = warm sound
+          const osc = audio.ctx.createOscillator();
+          const g = audio.ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.value = freq;
+          osc.detune.value = detune;
+          g.gain.setValueAtTime(0.0001, t);
+          g.gain.exponentialRampToValueAtTime(0.12, t + 2);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + 7);
+          osc.connect(g); g.connect(filter);
+          osc.start(t); osc.stop(t + 7.1);
+        });
+      });
+      chordIndex = (chordIndex + 1) % CHORDS.length;
+    }
+    function startMusic() {
+      playChord();
+      audio.chordTimer = setInterval(playChord, 6000);
+    }
+
+    // ----- Hit sparkles: a small burst of glowing dots -----
+    const BURST_DOTS = 24;
+    const dotTexture = (() => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 32;
+      const g = c.getContext('2d');
+      const grad = g.createRadialGradient(16, 16, 0, 16, 16, 16);
+      grad.addColorStop(0, 'rgba(255,255,255,1)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = grad; g.fillRect(0, 0, 32, 32);
+      return new THREE.CanvasTexture(c);
+    })();
+    const bursts = [];
+    for (let b = 0; b < 6; b++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BURST_DOTS * 3), 3));
+      const points = new THREE.Points(geo, new THREE.PointsMaterial({
+        size: 0.03, map: dotTexture, transparent: true, depthWrite: false, opacity: 0 }));
+      points.frustumCulled = false;
+      points.visible = false;
+      scene.add(points);
+      bursts.push({ points, vel: new Float32Array(BURST_DOTS * 3), age: 99 });
+    }
+    let nextBurst = 0;
+    function spawnBurst(pos, color) {
+      const b = bursts[nextBurst];
+      nextBurst = (nextBurst + 1) % bursts.length;
+      const p = b.points.geometry.attributes.position.array;
+      for (let i = 0; i < BURST_DOTS; i++) {
+        p[i * 3] = pos.x; p[i * 3 + 1] = pos.y; p[i * 3 + 2] = pos.z;
+        // random direction, random speed
+        const theta = Math.random() * Math.PI * 2, phi = Math.acos(Math.random() * 2 - 1);
+        const speed = 0.4 + Math.random() * 0.8;
+        b.vel[i * 3] = Math.sin(phi) * Math.cos(theta) * speed;
+        b.vel[i * 3 + 1] = Math.abs(Math.cos(phi)) * speed;
+        b.vel[i * 3 + 2] = Math.sin(phi) * Math.sin(theta) * speed;
+      }
+      b.points.geometry.attributes.position.needsUpdate = true;
+      b.points.material.color.set(color);
+      b.points.visible = true;
+      b.age = 0;
+    }
+    function updateBursts(dt) {
+      bursts.forEach(b => {
+        if (b.age > 0.7) { b.points.visible = false; return; }
+        b.age += dt;
+        const p = b.points.geometry.attributes.position.array;
+        for (let i = 0; i < BURST_DOTS; i++) {
+          b.vel[i * 3 + 1] -= 1.5 * dt;   // a little gravity
+          p[i * 3] += b.vel[i * 3] * dt;
+          p[i * 3 + 1] += b.vel[i * 3 + 1] * dt;
+          p[i * 3 + 2] += b.vel[i * 3 + 2] * dt;
+        }
+        b.points.geometry.attributes.position.needsUpdate = true;
+        b.points.material.opacity = Math.max(0, 1 - b.age / 0.7);
+      });
+    }
+
     // ---------- WINDOW RESIZE ----------
     window.addEventListener('resize', () => {
       camera.aspect = innerWidth / innerHeight;
@@ -1331,6 +1661,7 @@
       updateUI();
       updateDart(dt);
       updatePopups(dt);
+      updateBursts(dt);
       renderer.render(scene, camera);
     });
   </script>
