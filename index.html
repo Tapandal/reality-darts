@@ -70,16 +70,8 @@
       return target;
     }
 
-    const target = makeTarget();
-    target.position.set(0, 1.2, -1.5);
-    scene.add(target);
-
     // ---------- STAGE 2: GAZE ----------
-    const target2 = makeTarget();
-    target2.position.set(-0.8, 1.0, -1.6);
-    scene.add(target2);
-
-    const targets = [target, target2];
+    const targets = []; // filled in Stage 7
     let gazedTarget = null;
     const gazePoint = new THREE.Vector3(); // the exact spot on the target your dot is touching
 
@@ -114,7 +106,9 @@
       gazedTarget = found;
 
       targets.forEach(t => {
-        t.scale.lerp(t === gazedTarget ? bigSize : normalSize, 0.15);
+        const base = t.userData.baseScale || 1;
+        const goal = (t === gazedTarget ? 1.12 : 1) * base;
+        t.scale.lerp(bigSize.set(goal, goal, goal), 0.15);
       });
 
       gazeDot.material.color.set(gazedTarget ? 0x39ff88 : 0xffffff);
@@ -288,6 +282,8 @@
 
     function throwDart(handVel) {
       let handSpeed = handVel.length();
+      throwTooHard = handSpeed > LOB_MAX_HAND_SPEED;   // Stage 7: for Gentle Lob targets
+      bouncedOff = null;
 
       if (handSpeed < MIN_FLICK_SPEED) {
         if (!TEST_MODE) { cancelDart(); return; } // gentle let-go = no throw
@@ -299,7 +295,10 @@
       const dartSpeed = THREE.MathUtils.clamp(handSpeed * 3, 3, 9);
       const dir = handVel.clone().normalize();
 
-      if (gazedTarget) {
+      if (gazedTarget && gazedTarget.userData.type === 'lob') {
+        // Gentle Lob: a high, soft arc that drops onto the table
+        lobVelocity(dart.position, gazePoint, dartVel);
+      } else if (gazedTarget) {
         // Aim assist: bend the throw toward the target you're looking at
         // Aim at the exact spot under your gaze dot (not just the target's centre)
         const toTarget = gazePoint.clone().sub(dart.position);
@@ -366,7 +365,7 @@
       hitRay.set(dart.position, moveDir);
       hitRay.far = dartVel.length() * dt + DART_TIP;
 
-      const hits = hitRay.intersectObjects(targets, true)
+      const hits = hitRay.intersectObjects(targets.filter(t => t.visible && t !== bouncedOff), true)
         .filter(h => !h.object.userData.isStuckDart);   // ignore darts already stuck there
       if (hits.length === 0) return false;
 
@@ -377,8 +376,14 @@
       // How far from the centre did it land? (measured on the target itself)
       localHit.copy(hit.point);
       hitTarget.worldToLocal(localHit);
-      const result = ringScore(Math.hypot(localHit.x, localHit.y));
+      const result = scoreHit(hitTarget, localHit);   // Stage 7: each target type scores differently
       if (!result) return false;   // touched the edge only, keep flying
+
+      // Gentle Lob: thrown too hard? The dart bounces off instead of sticking
+      if (hitTarget.userData.type === 'lob' && throwTooHard) {
+        bounceOff(hitTarget, hit);
+        return false;
+      }
 
       // Put the dart so its tip sinks slightly into the board
       dart.position.copy(hit.point).addScaledVector(moveDir, -(DART_TIP - 0.015));
@@ -411,19 +416,22 @@
     const popups = [];
     function showPopup(text, color, position) {
       const canvas = document.createElement('canvas');
-      canvas.width = 512; canvas.height = 128;
+      canvas.width = 1024; canvas.height = 128;
       const ctx = canvas.getContext('2d');
-      ctx.font = 'bold 72px Arial';
+      // Shrink the font if the text is too wide, so nothing gets cut off (e.g. "+100")
+      let size = 80;
+      do { ctx.font = 'bold ' + size + 'px Arial'; size -= 4; }
+      while (ctx.measureText(text).width > 980 && size > 24);
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.lineWidth = 10; ctx.strokeStyle = '#000000';
-      ctx.strokeText(text, 256, 64);
+      ctx.strokeText(text, 512, 64);
       ctx.fillStyle = color;
-      ctx.fillText(text, 256, 64);
+      ctx.fillText(text, 512, 64);
 
       const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
         map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false
       }));
-      sprite.scale.set(0.4, 0.1, 1);
+      sprite.scale.set(0.6, 0.075, 1);
       sprite.position.copy(position);
       sprite.position.y += 0.15;
       sprite.renderOrder = 998;
@@ -598,40 +606,16 @@
       Object.assign(game, { thrown: 0, score: 0, hits: 0, best: 0, streak: 0, bestStreak: 0, waiting: false });
     }
 
-    // Place targets in front of wherever you're facing, at a comfortable seated height
-    // (right: forward, up, left-right). Stage 7 will use real surfaces instead.
-    const TARGET_LAYOUT = [
-      { forward: 1.5, up: -0.1, side: 0 },
-      { forward: 1.6, up: -0.3, side: -0.8 }
-    ];
-    const sideDir = new THREE.Vector3();
-    function placeTargetsInFront() {
-      camera.getWorldPosition(eyePos);
-      camera.getWorldDirection(flatDir);
-      flatDir.y = 0;
-      if (flatDir.lengthSq() < 0.001) flatDir.set(0, 0, -1);
-      flatDir.normalize();
-      sideDir.set(-flatDir.z, 0, flatDir.x); // points to your right
-      targets.forEach((t, i) => {
-        const L = TARGET_LAYOUT[i];
-        t.position.copy(eyePos)
-          .addScaledVector(flatDir, L.forward)
-          .addScaledVector(sideDir, L.side);
-        t.position.y = eyePos.y + L.up;
-        t.lookAt(eyePos);  // face the player
-      });
-    }
-
     function startPractice() {
       clearStuckDarts(); resetStats();
-      placeTargetsInFront();
+      placeTargets();
       game.mode = 'practice';
       drawHud();
     }
 
     function startRound() {
       clearStuckDarts(); resetStats();
-      placeTargetsInFront();
+      placeTargets();
       game.mode = 'round';
       drawHud();
     }
@@ -729,6 +713,286 @@
       handsMsg.mesh.visible = renderer.xr.isPresenting && isPlaying() && !handsVisible();
     }
 
+    // ---------- STAGE 7: FOUR TARGET TYPES + ROOM SURFACES ----------
+    const LOB_MAX_HAND_SPEED = 1.8; // flick faster than this (m/s) at a Lob target = "too hard"
+    const LOB_FLIGHT_TIME = 0.8;    // seconds a lob takes to land (higher = taller arc)
+    const FAST_SPEED = 0.35;        // Moving target counts as "fast" above this speed (m/s)
+    const FAST_BONUS = 30;
+    let throwTooHard = false;
+    let bouncedOff = null;
+
+    // A soft arc that lands exactly on 'to' after LOB_FLIGHT_TIME seconds
+    function lobVelocity(from, to, out) {
+      const T = LOB_FLIGHT_TIME;
+      out.copy(to).sub(from).divideScalar(T);
+      out.y += 0.5 * GRAVITY * T;
+      return out;
+    }
+
+    // Small text label that floats above a target (not clickable)
+    function makeLabel(text, color) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 96;
+      const c = canvas.getContext('2d');
+      roundRect(c, 4, 4, 504, 88, 44);
+      c.fillStyle = 'rgba(11, 15, 26, 0.75)'; c.fill();
+      c.fillStyle = color; c.font = 'bold 48px Arial';
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.fillText(text, 256, 50);
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false
+      }));
+      sprite.scale.set(0.38, 0.071, 1);
+      sprite.renderOrder = 997;
+      sprite.raycast = () => {};   // the gaze and darts ignore labels
+      scene.add(sprite);
+      return sprite;
+    }
+
+    function addTarget(group, type, labelText, labelColor) {
+      group.userData.type = type;
+      group.userData.baseScale = 1;
+      group.userData.label = makeLabel(labelText, labelColor);
+      group.userData.speed = 0;
+      targets.push(group);
+      scene.add(group);
+      return group;
+    }
+
+    // 1. Straight Throw: the normal board, goes on a wall
+    const straightTarget = addTarget(makeTarget(), 'straight', 'STRAIGHT', '#ffffff');
+
+    // 2. Gentle Lob: the normal board lying flat on a table
+    const lobTarget = addTarget(makeTarget(), 'lob', 'GENTLE LOB', '#39ff88');
+
+    // 3. Moving: the normal board sliding left and right
+    const movingTarget = addTarget(makeTarget(), 'moving', 'MOVING', '#ffd23f');
+
+    // 4. Weak Point: a big purple board with one small glowing spot
+    const WEAK_BOARD = 0.32, WEAK_SPOT = 0.06;
+    const weakGroup = new THREE.Group();
+    const weakBoard = new THREE.Mesh(
+      new THREE.CircleGeometry(WEAK_BOARD, 64),
+      new THREE.MeshBasicMaterial({ color: 0x6a3cff })
+    );
+    const weakRim = new THREE.Mesh(
+      new THREE.RingGeometry(WEAK_BOARD - 0.02, WEAK_BOARD, 64),
+      new THREE.MeshBasicMaterial({ color: 0xb59bff })
+    );
+    weakRim.position.z = 0.001;
+    const weakGlow = new THREE.Mesh(
+      new THREE.CircleGeometry(WEAK_SPOT * 1.8, 32),
+      new THREE.MeshBasicMaterial({ color: 0x39ff88, transparent: true, opacity: 0.35 })
+    );
+    weakGlow.position.z = 0.002;
+    const weakSpot = new THREE.Mesh(
+      new THREE.CircleGeometry(WEAK_SPOT, 32),
+      new THREE.MeshBasicMaterial({ color: 0x39ff88 })
+    );
+    weakSpot.position.z = 0.003;
+    weakGroup.add(weakBoard, weakRim, weakGlow, weakSpot);
+    const weakTarget = addTarget(weakGroup, 'weak', 'WEAK POINT', '#b59bff');
+
+    // Move the weak point to a new random spot (after each hit)
+    function moveWeakSpot() {
+      const angle = Math.random() * Math.PI * 2;
+      const r = 0.06 + Math.random() * 0.14;
+      weakSpot.position.x = weakGlow.position.x = Math.cos(angle) * r;
+      weakSpot.position.y = weakGlow.position.y = Math.sin(angle) * r;
+    }
+    moveWeakSpot();
+    targets.forEach(t => t.visible = false); // hidden until the game places them
+
+    // Scoring for each target type. 'local' = where the dart landed, measured on the target.
+    function scoreHit(t, local) {
+      const type = t.userData.type;
+      if (type === 'weak') {
+        const toSpot = Math.hypot(local.x - weakSpot.position.x, local.y - weakSpot.position.y);
+        if (toSpot <= WEAK_SPOT * 1.2) {   // a little forgiving
+          setTimeout(moveWeakSpot, 400);
+          return { points: 150, text: 'WEAK POINT! +150', color: '#39ff88' };
+        }
+        if (Math.hypot(local.x, local.y) <= WEAK_BOARD) return { points: 20, text: '+20', color: '#b59bff' };
+        return null;
+      }
+
+      const result = ringScore(Math.hypot(local.x, local.y));
+      if (result && type === 'moving' && Math.abs(t.userData.speed) > FAST_SPEED) {
+        return { points: result.points + FAST_BONUS,
+                 text: result.text + '  FAST +' + FAST_BONUS, color: result.color };
+      }
+      return result;
+    }
+
+    // Too-hard throw at a lob target: the dart ricochets up and away (counts as a miss)
+    const bounceNormal = new THREE.Vector3();
+    function bounceOff(t, hit) {
+      bouncedOff = t;
+      bounceNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+      dartVel.reflect(bounceNormal).multiplyScalar(0.45);
+      showPopup('TOO HARD!', '#ffd23f', hit.point);
+    }
+
+    // ----- Room surfaces (Quest 3 / 3S "plane detection") -----
+    // Every frame we remember the walls and tables the headset has found.
+    let roomPlanes = [];
+    const tmpMatrix = new THREE.Matrix4();
+    function scanPlanes(frame) {
+      const refSpace = renderer.xr.getReferenceSpace();
+      if (!frame || !frame.detectedPlanes || !refSpace) return;
+      const list = [];
+      frame.detectedPlanes.forEach(plane => {
+        const pose = frame.getPose(plane.planeSpace, refSpace);
+        if (!pose) return;
+        tmpMatrix.fromArray(pose.transform.matrix);
+        // Centre of the plane's outline, and its size
+        let cx = 0, cz = 0, minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        plane.polygon.forEach(p => {
+          cx += p.x; cz += p.z;
+          minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+          minZ = Math.min(minZ, p.z); maxZ = Math.max(maxZ, p.z);
+        });
+        const n = Math.max(plane.polygon.length, 1);
+        const centre = new THREE.Vector3(cx / n, 0, cz / n).applyMatrix4(tmpMatrix);
+        const normal = new THREE.Vector3(0, 1, 0).transformDirection(tmpMatrix); // plane's "up"
+        list.push({
+          orientation: plane.orientation, // 'horizontal' or 'vertical'
+          label: plane.semanticLabel || '',
+          centre, normal,
+          width: maxX - minX, depth: maxZ - minZ
+        });
+      });
+      roomPlanes = list;
+    }
+
+    // Find a wall in front of you, 1–3.5 m away. Returns the spot straight ahead on it.
+    const toPlane = new THREE.Vector3();
+    function findWall() {
+      let best = null;
+      roomPlanes.forEach(p => {
+        if (p.orientation !== 'vertical') return;
+        if (p.label && p.label !== 'wall') return;   // skip doors, windows, screens...
+        const normal = p.normal.clone();
+        normal.y = 0; normal.normalize();
+        if (normal.dot(flatDir) > 0) normal.negate(); // make it face you
+        const facing = -normal.dot(flatDir);
+        if (facing < 0.75) return;                    // wall must be roughly in front of you
+        // Where does your straight-ahead line meet the wall?
+        toPlane.copy(p.centre).sub(eyePos);
+        const distance = -toPlane.dot(normal) / facing;
+        if (distance < 1.0 || distance > 3.5) return;
+        const spot = eyePos.clone().addScaledVector(flatDir, distance);
+        if (!best || distance < best.distance) best = { spot, normal, distance };
+      });
+      return best;
+    }
+
+    // Find a table/desk/low surface in front of you (top facing up, 25–100 cm below your eyes)
+    function findTable() {
+      let best = null;
+      roomPlanes.forEach(p => {
+        if (p.orientation !== 'horizontal') return;
+        if (p.label === 'floor' || p.label === 'ceiling') return;
+        if (p.normal.y < 0.9) return;
+        const below = eyePos.y - p.centre.y;
+        if (below < 0.25 || below > 1.0) return;
+        if (p.width < 0.35 || p.depth < 0.35) return;      // big enough for the board
+        toPlane.copy(p.centre).sub(eyePos); toPlane.y = 0;
+        const distance = toPlane.length();
+        if (distance < 0.5 || distance > 2.0) return;
+        if (toPlane.normalize().dot(flatDir) < 0.4) return; // roughly in front
+        if (!best || distance < best.distance) best = { spot: p.centre.clone(), distance };
+      });
+      return best;
+    }
+
+    // Place a target at (forward, up, side) metres from your eyes, facing you
+    function placeRelative(t, forward, up, side) {
+      t.position.copy(eyePos).addScaledVector(flatDir, forward).addScaledVector(sideDir, side);
+      t.position.y = eyePos.y + up;
+      t.lookAt(eyePos.x, t.position.y, eyePos.z);
+    }
+
+    const sideDir = new THREE.Vector3();
+    function placeTargets() {
+      camera.getWorldPosition(eyePos);
+      camera.getWorldDirection(flatDir);
+      flatDir.y = 0;
+      if (flatDir.lengthSq() < 0.001) flatDir.set(0, 0, -1);
+      flatDir.normalize();
+      sideDir.set(-flatDir.z, 0, flatDir.x); // points to your right
+
+      const wall = findWall();
+      const table = findTable();
+      let maxForward = 2.0;  // floating targets must stay in front of any wall
+
+      // 1. Straight Throw: on the wall, or 2 m in front of you
+      if (wall) {
+        straightTarget.position.copy(wall.spot).addScaledVector(wall.normal, 0.01);
+        straightTarget.position.y = eyePos.y - 0.05;
+        straightTarget.lookAt(straightTarget.position.clone().add(wall.normal));
+        maxForward = Math.min(2.0, wall.distance - 0.2);
+        // Far walls get a bigger board so it's still easy to see
+        straightTarget.userData.baseScale = THREE.MathUtils.clamp(wall.distance / 2, 1, 1.5);
+      } else {
+        placeRelative(straightTarget, 2.0, -0.05, 0);
+        straightTarget.userData.baseScale = 1;
+      }
+
+      // 2. Gentle Lob: flat on the table, or floating flat at table height
+      if (table) {
+        lobTarget.position.copy(table.spot);
+        lobTarget.position.y += 0.005;
+      } else {
+        placeRelative(lobTarget, 1.1, -0.55, 0.35);
+      }
+      lobTarget.lookAt(lobTarget.position.x, lobTarget.position.y + 1, lobTarget.position.z); // face up
+
+      // 3. Moving: upper left, slides side to side
+      placeRelative(movingTarget, Math.min(1.8, maxForward), 0.3, -0.75);
+      movingTarget.userData.home = movingTarget.position.clone();
+      movingTarget.userData.slideDir = sideDir.clone();
+      movingTarget.userData.phase = 0;
+
+      // 4. Weak Point: upper right
+      placeRelative(weakTarget, Math.min(1.9, maxForward), 0.3, 0.8);
+      moveWeakSpot();
+
+      // Tell the player what we found
+      const found = [wall ? 'wall' : null, table ? 'table' : null].filter(Boolean);
+      const msg = found.length ? 'Using your ' + found.join(' + ') : 'Targets placed in front of you';
+      showPopup(msg, '#ffffff', straightTarget.position.clone().add(new THREE.Vector3(0, 0.3, 0)));
+    }
+
+    // Runs every frame: slide the moving target, pulse the weak point, keep labels above targets
+    const SLIDE_RANGE = 0.3;
+    let targetTime = 0;
+    function updateTargets(dt) {
+      targetTime += dt;
+
+      // Moving target speeds up and slows down so there are "fast" moments to aim for
+      const m = movingTarget.userData;
+      if (m.home) {
+        const angularSpeed = 1.4 + 1.1 * Math.sin(targetTime * 0.5); // 0.3 to 2.5
+        m.phase += angularSpeed * dt;
+        const offset = Math.sin(m.phase) * SLIDE_RANGE;
+        m.speed = Math.cos(m.phase) * SLIDE_RANGE * angularSpeed;  // metres per second
+        movingTarget.position.copy(m.home).addScaledVector(m.slideDir, offset);
+      }
+
+      // Weak point gently pulses
+      const pulse = 1 + 0.25 * Math.sin(targetTime * 5);
+      weakGlow.scale.set(pulse, pulse, 1);
+
+      // Labels follow their targets
+      targets.forEach(t => {
+        const label = t.userData.label;
+        label.visible = t.visible;
+        label.position.copy(t.position);
+        label.position.y += t.userData.type === 'lob' ? 0.12 : 0.36 * (t.userData.baseScale || 1);
+      });
+    }
+
     // ---------- WINDOW RESIZE ----------
     window.addEventListener('resize', () => {
       camera.aspect = innerWidth / innerHeight;
@@ -738,8 +1002,10 @@
 
     // ---------- GAME LOOP (runs every frame) ----------
     const clock = new THREE.Clock();
-    renderer.setAnimationLoop(() => {
+    renderer.setAnimationLoop((time, frame) => {
       const dt = Math.min(clock.getDelta(), 0.05); // seconds since last frame
+      scanPlanes(frame);
+      updateTargets(dt);
       updateGaze();
       updateUI();
       updateDart(dt);
