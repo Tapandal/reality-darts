@@ -80,6 +80,7 @@
 
     const targets = [target, target2];
     let gazedTarget = null;
+    const gazePoint = new THREE.Vector3(); // the exact spot on the target your dot is touching
 
     const gazeDot = new THREE.Mesh(
       new THREE.RingGeometry(0.008, 0.013, 32),
@@ -106,6 +107,7 @@
       let found = null;
       if (hits.length > 0) {
         found = hits[0].object;
+        gazePoint.copy(hits[0].point);
         while (found.parent && !targets.includes(found)) found = found.parent;
       }
       gazedTarget = found;
@@ -245,7 +247,7 @@
 
       // Point the dart at the target you're looking at, or straight ahead
       if (gazedTarget) {
-        gazedTarget.getWorldPosition(aimPoint);
+        aimPoint.copy(gazePoint);
       } else {
         camera.getWorldDirection(aimPoint);
         aimPoint.multiplyScalar(2).add(eyePos);
@@ -295,10 +297,11 @@
 
       if (gazedTarget) {
         // Aim assist: bend the throw toward the target you're looking at
-        gazedTarget.getWorldPosition(aimPoint);
-        const toTarget = aimPoint.clone().sub(dart.position);
+        // Aim at the exact spot under your gaze dot (not just the target's centre)
+        const toTarget = gazePoint.clone().sub(dart.position);
         const distance = toTarget.length();
-        dir.lerp(toTarget.normalize(), AIM_ASSIST).normalize();
+        const assist = TEST_MODE ? 1 : AIM_ASSIST; // emulator: perfect aim, so you can test each ring
+        dir.lerp(toTarget.normalize(), assist).normalize();
         dartVel.copy(dir).multiplyScalar(dartSpeed);
         // Aim a little higher so gravity drops the dart onto the target
         dartVel.y += 0.5 * GRAVITY * (distance / dartSpeed);
