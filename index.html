@@ -277,9 +277,9 @@
     // The normal link = real headset mode: only a real flick throws.
     const URL_FLAGS = new URLSearchParams(location.search);
     const TEST_MODE = URL_FLAGS.has('test');
-    const MIN_FLICK_SPEED = 0.8; // how fast (metres/second) your hand must move to count as a throw
+    const MIN_FLICK_SPEED = 0.5; // how fast (metres/second) your hand must move to count as a throw
     const GRAVITY = 4.0;         // gentle gravity (real life is 9.8) so throws feel forgiving
-    const AIM_ASSIST = 0.75;     // 0 = only your hand direction, 1 = straight at the target you look at
+    const AIM_ASSIST = 0.9;      // 0 = only your hand direction, 1 = straight at the target you look at
 
     const handSamples = [];      // hand positions from the last 0.1 seconds
     const dartVel = new THREE.Vector3(); // dart speed + direction while flying
@@ -310,7 +310,9 @@
       noGravity = isBankStage();                       // Stage 8: bank shots fly straight
 
       if (handSpeed < MIN_FLICK_SPEED) {
-        if (!TEST_MODE) { cancelDart(); return; } // gentle let-go = no throw
+        // Forgiving: a slow release still throws if you're looking at a target.
+        // Only a slow release while looking away puts the dart back.
+        if (!TEST_MODE && !gazedTarget) { cancelDart(); return; }
         handSpeed = 1.5;            // emulator: pretend you flicked
         handVel.copy(eyeDir);       // ...in the direction you're looking
       }
@@ -810,7 +812,7 @@
     }
 
     // ---------- STAGE 7: FOUR TARGET TYPES + ROOM SURFACES ----------
-    const LOB_MAX_HAND_SPEED = 1.8; // flick faster than this (m/s) at a Lob target = "too hard"
+    const LOB_MAX_HAND_SPEED = 2.5; // flick faster than this (m/s) at a Lob target = "too hard"
     const LOB_FLIGHT_TIME = 0.8;    // seconds a lob takes to land (higher = taller arc)
     const FAST_SPEED = 0.35;        // Moving target counts as "fast" above this speed (m/s)
     const FAST_BONUS = 30;
