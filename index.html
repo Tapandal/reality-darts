@@ -273,7 +273,10 @@
 
     // ---------- STAGE 4: FLICK TO THROW ----------
     // Settings you can tweak later on the real headset:
-    const TEST_MODE = true;      // true = emulator test: any release throws. Set to false on the real Quest.
+    // Test mode is switched on by adding ?test to the link (for the PC emulator).
+    // The normal link = real headset mode: only a real flick throws.
+    const URL_FLAGS = new URLSearchParams(location.search);
+    const TEST_MODE = URL_FLAGS.has('test');
     const MIN_FLICK_SPEED = 0.8; // how fast (metres/second) your hand must move to count as a throw
     const GRAVITY = 4.0;         // gentle gravity (real life is 9.8) so throws feel forgiving
     const AIM_ASSIST = 0.75;     // 0 = only your hand direction, 1 = straight at the target you look at
@@ -1652,8 +1655,27 @@
 
     // ---------- GAME LOOP (runs every frame) ----------
     const clock = new THREE.Clock();
+    // Add ?fps to the link to see frames per second on the score bar (goal: 60+)
+    const SHOW_FPS = URL_FLAGS.has('fps');
+    let fpsFrames = 0, fpsTime = 0;
     renderer.setAnimationLoop((time, frame) => {
-      const dt = Math.min(clock.getDelta(), 0.05); // seconds since last frame
+      const rawDt = clock.getDelta();
+      const dt = Math.min(rawDt, 0.05); // seconds since last frame
+      if (SHOW_FPS) {
+        fpsFrames++; fpsTime += rawDt;
+        if (fpsTime >= 1) {
+          const fps = Math.round(fpsFrames / fpsTime);
+          fpsFrames = 0; fpsTime = 0;
+          if (hud.mesh.visible) {
+            drawHud();
+            const c = hud.ctx;
+            c.fillStyle = fps >= 60 ? '#39ff88' : '#ff3b6b';
+            c.font = 'bold 36px Arial'; c.textAlign = 'center';
+            c.fillText(fps + ' FPS', 500, 70);
+            hud.texture.needsUpdate = true;
+          }
+        }
+      }
       scanPlanes(frame);
       updateTargets(dt);
       updateTrick(dt);
