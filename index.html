@@ -255,7 +255,7 @@
 
     // Once a hand model has loaded, make it slightly see-through so that on the
     // Quest your real hands (seen through passthrough) still show underneath
-    const SKIN_TONE = 0xc68863;   // change this colour to match your own hands in the video
+    const SKIN_TONE = 0xe0b08e;   // change this colour to match your own hands in the video
     function styleHands() {
       hands.forEach(h => h.hand.traverse(o => {
         if (o.isMesh && !o.userData.styled) {
@@ -342,17 +342,37 @@
       // While holding, remember where the hand was (used to measure the flick)
       if (dartState === 'held') recordHandSample(gripPos.copy(pinchPos));
 
-      // Point the dart at the target you're looking at, or straight ahead
+      // Where the dart should point: the target you're looking at, or straight ahead
       if (gazedTarget) {
         aimPoint.copy(gazePoint);
       } else {
         camera.getWorldDirection(aimPoint);
         aimPoint.multiplyScalar(2).add(eyePos);
       }
-      dart.lookAt(aimPoint);
-      // Slide the dart back so your fingers hold the middle of the barrel, like a real grip
+      aimDir.copy(aimPoint).sub(pinchPos).normalize();
+
+      // Real grip (like a darts player): the barrel is pinched between the thumb and index
+      // fingertips, the point aims forward at the target and the flights sit back toward you.
+      // The hand turns around the dart, not the other way round, so the dart follows the aim.
+      dartDir.copy(aimDir);
+      // Simple, correct pinch grip: the barrel sits exactly between the thumb tip and the
+      // index fingertip, lying ACROSS the line joining them (so it never pokes through a finger),
+      // and turned as close to the target as that allows.
+      const thumbTip = info.hand.joints['thumb-tip'];
+      const indexTip = info.hand.joints['index-finger-tip'];
+      if (info.isHand && dartState === 'held' && thumbTip && indexTip && thumbTip.visible) {
+        thumbTip.getWorldPosition(tipA);
+        indexTip.getWorldPosition(tipB);
+        pinchLine.copy(tipB).sub(tipA).normalize();
+        dartDir.addScaledVector(pinchLine, -dartDir.dot(pinchLine));
+        if (dartDir.lengthSq() < 0.01) dartDir.copy(aimDir); else dartDir.normalize();
+      }
+      dart.lookAt(lookPoint.copy(dart.position).add(dartDir));
+      // Slide the dart back so the fingers hold the middle of the barrel
       dart.translateZ(-DART_GRIP);
     }
+    const aimDir = new THREE.Vector3(), fingerDir = new THREE.Vector3(), pinchLine = new THREE.Vector3();
+    const dartDir = new THREE.Vector3(), lookPoint = new THREE.Vector3();
     const gripPos = new THREE.Vector3();
 
     // ---------- STAGE 4: FLICK TO THROW ----------
