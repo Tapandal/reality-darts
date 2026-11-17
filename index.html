@@ -52,7 +52,12 @@
       document.getElementById('info').style.display = 'none';
       initAudio(); // Stage 9: sound + music
       showMenu('intro'); // Stage 6: start with How to Play
+      // When the player recenters the headset, the game's "forward" changes.
+      // Re-place everything so targets sit flat on the wall and face the player again.
+      const ref = renderer.xr.getReferenceSpace();
+      if (ref && ref.addEventListener) ref.addEventListener('reset', () => { recenterFrames = 3; });
     });
+    let recenterFrames = 0;
 
     // A round soft-glow picture made once and shared by all targets
     const glowMaterial = (() => {
@@ -381,9 +386,9 @@
     // The normal link = real headset mode: only a real flick throws.
     const URL_FLAGS = new URLSearchParams(location.search);
     const TEST_MODE = URL_FLAGS.has('test');
-    const MIN_FLICK_SPEED = 0.5; // how fast (metres/second) your hand must move to count as a throw
+    const MIN_FLICK_SPEED = 0.6; // how fast (metres/second) your hand must move FORWARD to count as a throw
     const GRAVITY = 4.0;         // gentle gravity (real life is 9.8) so throws feel forgiving
-    const AIM_ASSIST = 0.9;      // 0 = only your hand direction, 1 = straight at the target you look at
+    const AIM_ASSIST = 0.6;      // 0 = only your hand direction, 1 = straight at the target you look at
 
     const handSamples = [];      // hand positions from the last 0.1 seconds
     const dartVel = new THREE.Vector3(); // dart speed + direction while flying
@@ -414,16 +419,22 @@
       bankBounced = false;                             // Stage 8
       noGravity = isBankStage();                       // Stage 8: bank shots fly straight
 
-      if (handSpeed < MIN_FLICK_SPEED) {
-        // Forgiving: a slow release still throws if you're looking at a target.
-        // Only a slow release while looking away puts the dart back.
-        if (!TEST_MODE && !gazedTarget) { cancelDart(); return; }
-        handSpeed = 1.5;            // emulator: pretend you flicked
-        handVel.copy(eyeDir);       // ...in the direction you're looking
+      // A real throw: your hand must be moving FORWARD (toward where you're aiming)
+      // when you let go. Just opening your fingers puts the dart back in your hand.
+      const aimWay = gazedTarget ? gazePoint.clone().sub(dart.position).normalize() : eyeDir.clone();
+      const forwardSpeed = handVel.dot(aimWay);
+      if (forwardSpeed < MIN_FLICK_SPEED) {
+        if (!TEST_MODE) {
+          cancelDart();
+          showPopup('THROW IT! MOVE YOUR HAND FORWARD', '#ffd23f', dart.position.clone().add(new THREE.Vector3(0, 0.12, 0)));
+          return;
+        }
+        handSpeed = 1.5;            // PC emulator only: pretend you made a throwing motion
+        handVel.copy(aimWay).multiplyScalar(handSpeed);
       }
 
-      // Turn a small hand flick into a satisfying dart speed (3 to 9 m/s)
-      const dartSpeed = THREE.MathUtils.clamp(handSpeed * 3, 3, 9);
+      // Your hand speed sets the dart speed (a faster throw flies faster: 3 to 10 m/s)
+      const dartSpeed = THREE.MathUtils.clamp(handSpeed * 3.5, 3, 10);
       const dir = handVel.clone().normalize();
 
       if (gazedTarget && gazedTarget.userData.type === 'lob') {
@@ -1299,6 +1310,18 @@
     function trickGo() {
       clearStuckDarts();
       Object.assign(trick, { darts: 0, hits: 0, streak: 0, score: 0, chainNext: 0, chainDone: false });
+      placeTrickStage();
+      activeTargets = TRICK_TARGETS[trick.stage];
+      lastPlay = 'trick';
+      placePauseButton();
+      game.mode = 'trick';
+      game.waiting = false;
+      hideMenu();
+      drawHud();
+    }
+
+    // Put the current trick-shot challenge's targets in front of the player
+    function placeTrickStage() {
       const k = readHeading();
       if (trick.stage === 0) {
         placeRelative(tinyTarget, 1.8 * k, 0.05, 0);
@@ -1316,13 +1339,15 @@
       } else {
         resetChain(k);
       }
-      activeTargets = TRICK_TARGETS[trick.stage];
-      lastPlay = 'trick';
+    }
+
+    // After a recenter: put targets, pause button and menus back in front of the player
+    function relayoutAfterRecenter() {
+      if (menu.visible) menuPlaceFrames = 3;
+      const playing = isPlaying() || ['pause', 'howto', 'settings'].includes(game.mode);
+      if (!playing) return;   // targets get placed when the next round starts anyway
+      if (lastPlay === 'trick') placeTrickStage(); else placeTargets();
       placePauseButton();
-      game.mode = 'trick';
-      game.waiting = false;
-      hideMenu();
-      drawHud();
     }
 
     // ----- Bank shot bounce -----
@@ -1801,6 +1826,7 @@
         }
       }
       scanPlanes(frame);
+      if (recenterFrames > 0 && --recenterFrames === 0) relayoutAfterRecenter();
       updateTargets(dt);
       updateTrick(dt);
       styleHands();
